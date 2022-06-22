@@ -1,128 +1,162 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"math/rand"
 	"net"
-	"strconv"
-	"strings"
 	"time"
 )
 
 // NodeInfo 用于json和结构体对象的互转
 type NodeInfo struct {
-	NodeId     int    `json:"nodeId"`     //节点ID，通过随机数生成
+	NodeName   string `json:"nodeName"`   //节点hostname
 	NodeIpAddr string `json:"nodeIpAddr"` //节点ip地址
 	Port       string `json:"port"`       //节点端口号
 }
+//DataNode节点的格式化输出
+func (node NodeInfo) string()string  {
+	nn,_:=json.Marshal(node)
+	var out bytes.Buffer
+	json.Indent(&out,nn,"","\t")
+	return  out.String()
+}
+// InitDN DataNode节点初始化
+func InitDN(NodeName,NodeIpAddr,Port string) NodeInfo {
+	return NodeInfo{
+		NodeName:   NodeName,
+		NodeIpAddr: NodeIpAddr,
+		Port:       Port,
+	}
+}
+// NameNodeInfo 用于json和结构体对象的互转
+type NameNodeInfo struct {
+	NodeName   string     `json:"nodeName"`   //节点hostname
+	NodeIpAddr string     `json:"nodeIpAddr"` //节点ip地址
+	Port       string     `json:"port"`       //节点端口号
+	NodeList   []NodeInfo `json:"NodeList"`   //存储已注册的DataNode节点
+}
+//NameNode节点信息的格式化输出
+func (namenode NameNodeInfo) string() string {
+	nn, _ := json.Marshal(namenode)
+	var out bytes.Buffer
+	json.Indent(&out, nn, "", "\t")
+	return out.String()
+}
 
-// AddToClusterMessage 添加一个节点到集群的一个请求或者响应的标准格式
-type AddToClusterMessage struct {
+// InitNN NameNode节点初始化
+func InitNN(NodeName,NodeIpAddr,Port string) NameNodeInfo {
+	return NameNodeInfo{
+		NodeName:   NodeName,
+		NodeIpAddr: NodeIpAddr,
+		Port:       Port,
+		NodeList:   nil,
+	}
+}
+// MessageInfo 节点间发起一个请求或者响应的标准格式（节点间通讯信息）
+type MessageInfo struct {
 	Source  NodeInfo `json:"source"`
 	Dest    NodeInfo `json:"dest"`
 	Message string   `json:"message"`
 }
-
-//将节点信息格式化输出
-func (node *NodeInfo) String() string {
-	return "NodeInfo {nodeId:" + strconv.Itoa(node.NodeId) + ", nodeIpAddr:" + node.NodeIpAddr + ", port:" + node.Port + "}"
-}
-
-//将添加节点信息格式化
-func (req AddToClusterMessage) String() string {
-	return "AddToClusterMessage:{\n  source:" + req.Source.String() + ",\n  dest: " + req.Dest.String() + ",\n  message:" + req.Message + " }"
+//将节点间通讯信息格式化
+func (msg MessageInfo) String() string {
+	nn, _ := json.Marshal(msg)
+	var out bytes.Buffer
+	json.Indent(&out, nn, "", "\t")
+	return out.String()
 }
 
 func main() {
-
-	makeMasterOnError := flag.Bool("makeMasterOnError", false, "make this node master if unable to connect to the cluster ip provided.")
-	clusterip := flag.String("clusterip", "127.0.0.1:8001", "ip address of any node to connnect")
-	myport := flag.String("myport", "8001", "ip address to run this node on. default is 8001.")
+	//节点类型参数
+	nodeType:=flag.String("nodeType","NameNode","请输入节点类型：NameNode,DataNode,Client")
+	clusterIp := flag.String("clusterIp", "127.0.0.1:30000", "ip address of any node to connect")
+	myPort := flag.String("myPort", "30000", "ip address to run this node on. default is 30000.")
+	myName := flag.String("myName", "master", "node hostname")
 	flag.Parse()
-
-	rand.Seed(time.Now().UTC().UnixNano()) //种子
-	myid := rand.Intn(9999999)
 
 	//获取ip地址
 	myIp, _ := net.InterfaceAddrs()
 
-	//创建nodeInfo结构体
-	me := NodeInfo{NodeId: myid, NodeIpAddr: myIp[0].String(), Port: *myport}
-	dest := NodeInfo{NodeId: -1, NodeIpAddr: strings.Split(*clusterip, ":")[0], Port: strings.Split(*clusterip, ":")[1]}
-	fmt.Println("我的节点信息：", me.String())
-	//尝试连接到集群，在已连接的情况下向集群发送请求
-	ableToConnect := connectToCluster(me, dest)
+	//创建Node结构体
+	switch *nodeType {
+	case "NameNode":
+		//创建NameNode结构体
+		me:=InitNN(*myName,myIp[0].String(),*myPort)
+		fmt.Println("我的节点信息：",me.string())
+		//启动NN节点
+		fmt.Println("将启动me节点为NameNode节点")
+		StartNN(me)
+	case "DataNode":
+		//创建DataNode结构体
+		me:=InitDN(*myName,myIp[0].String(),*myPort)
+		fmt.Println("我的节点信息：",me.string())
+		//启动DN节点
+		fmt.Println("将启动me节点为DataNode节点")
+		StartDN(me,*clusterIp)
+	}
+}
 
-	//如果dest节点不存在，则me节点为主节点启动，否则直接退出系统
-	if ableToConnect || (!ableToConnect && *makeMasterOnError) {
-		if *makeMasterOnError {
-			fmt.Println("将启动me节点为主节点")
+// StartNN 启动NameNode节点
+func StartNN(me NameNodeInfo)  {
+	//监听即将到来的信息
+	listen, _:= net.Listen("tcp",":"+me.Port )
+	defer listen.Close()
+	for {
+		conn, err := listen.Accept() //建立连接
+		if err != nil {
+			fmt.Println("accept failed, err:", err)
+			continue
 		}
-		listenOnPort(me)
-	} else {
-		fmt.Println("正在退出系统，请设置me节点为主节点")
+		go me.processNN(conn)//启动一个goroutine处理连接
 	}
 }
 
-//发送请求时格式化json包有用的工具
-func getAddToClusterMessage(source NodeInfo, dest NodeInfo, message string) AddToClusterMessage {
-	return AddToClusterMessage{
-		Source: NodeInfo{
-			NodeId:     source.NodeId,
-			NodeIpAddr: source.NodeIpAddr,
-			Port:       source.Port},
-		Dest: NodeInfo{
-			NodeId:     dest.NodeId,
-			NodeIpAddr: dest.NodeIpAddr,
-			Port:       dest.Port},
-		Message: message,
+func (NN *NameNodeInfo)processNN(conn net.Conn) {
+	defer conn.Close()
+	//初次连接，注册节点
+	var datanode NodeInfo
+	json.NewDecoder(conn).Decode(&datanode)
+	NN.NodeList = append(NN.NodeList,datanode )
+	json.NewEncoder(conn).Encode(&NN)
+	for {
+		var msg NodeInfo
+		err := json.NewDecoder(conn).Decode(&msg)
+		if err != nil {
+			fmt.Println("decode msg failed, err:", err)
+			return
+		}
+		fmt.Printf("收到client:%v发来的数据：%v",conn,msg.string())
+		json.NewEncoder(conn).Encode(msg)
 	}
 }
-func connectToCluster(me NodeInfo, dest NodeInfo) bool {
-	//连接到socket的相关细节信息
-	connOut, err := net.DialTimeout("tcp", dest.NodeIpAddr+":"+dest.Port, time.Duration(10)*time.Second)
+
+// StartDN 启动DateNode节点
+func StartDN(me NodeInfo,clusterIp string) bool {
+	conn, err := net.DialTimeout("tcp", clusterIp,time.Duration(10)*time.Second)
 	if err != nil {
 		if _, ok := err.(net.Error); ok {
-			fmt.Println("不能连接到集群", me.NodeId)
+			fmt.Println("不能连接到集群", me.NodeName)
 			return false
 		}
-	} else {
-		fmt.Println("连接到集群")
-		text := "Hi nody.. 请添加我到集群"
-		requestMessage := getAddToClusterMessage(me, dest, text)
-		json.NewEncoder(connOut).Encode(&requestMessage)
-
-		decoder := json.NewDecoder(connOut)
-		var responseMessage AddToClusterMessage
-		decoder.Decode(&responseMessage)
-		fmt.Println("得到数据响应:\n" + responseMessage.String())
-		return true
 	}
-	return false
-}
+	defer conn.Close()  // 关闭连接
+	for i := 0; i < 2; i++ {
+		json.NewEncoder(conn).Encode(&me)
 
-//me节点连接其它节点成功或者自身成为主节点之后开始监听别的节点在未来可能对它自身的连接
-func listenOnPort(me NodeInfo) {
-	//监听即将到来的信息
-	ln, _ := net.Listen("tcp", fmt.Sprint(":"+me.Port))
-	//接受连接
-	for {
-		connIn, err := ln.Accept()
-		if err != nil {
-			if _, ok := err.(net.Error); ok {
-				fmt.Println("Error received while listening.", me.NodeId)
-			}
-		} else {
-			var requestMessage AddToClusterMessage
-			json.NewDecoder(connIn).Decode(&requestMessage)
-			fmt.Println("Got request:\n" + requestMessage.String())
-
-			text := "已添加你到集群"
-			responseMessage := getAddToClusterMessage(me, requestMessage.Source, text)
-			json.NewEncoder(connIn).Encode(&responseMessage)
-			connIn.Close()
-		}
+		decoder := json.NewDecoder(conn)
+		var responseMessage NameNodeInfo
+		decoder.Decode(&responseMessage) //响应信息
+		fmt.Println("得到数据响应:\n" + responseMessage.string())
 	}
+	return true
+	//for  {
+	//	json.NewEncoder(conn).Encode(&me)
+	//
+	//	decoder := json.NewDecoder(conn)
+	//	var responseMessage NameNodeInfo
+	//	decoder.Decode(&responseMessage) //响应信息
+	//	fmt.Println("得到数据响应:\n" + responseMessage.string())
+	//}
 }
