@@ -72,7 +72,7 @@ func StartDNClient(dn DataNodeInfo, NameNodeIP string) *rpc.Client {
 	}
 	fmt.Println()
 	wg.Add(1)
-	go StartDNRPCServer(dn)
+	go StartDNRPCServer(&dn)
 	wg.Wait()
 	return client
 }
@@ -83,7 +83,14 @@ func GetNodeIP(nodename string, client *rpc.Client) string {
 	client.Call("NameNodeInfo.GetNodeIP", nodename, &ipPort)
 	return ipPort
 }
-func StartDNRPCServer(dn DataNodeInfo) {
+
+//获取datanode 信息
+func (node *DataNodeInfo) GetDNInfo(_ string, ret *string) error {
+	*ret = node.String()
+	return nil
+}
+func StartDNRPCServer(dn *DataNodeInfo) {
+	fmt.Println("启动DN服务器")
 	rpc.Register(dn)
 	rpc.HandleHTTP()
 
